@@ -33,6 +33,7 @@ class HFAPIEmbeddings(Embeddings):
         self.api_key = os.getenv("HF_TOKEN")
         self.model = "sentence-transformers/all-MiniLM-L6-v2"
         self.url = f"https://api-inference.huggingface.co/models/{self.model}"
+        print("🔥 NEW HF EMBEDDING CODE LOADED")
 
     def embed_documents(self, texts):
         return [self._embed(text) for text in texts]
