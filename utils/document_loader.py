@@ -7,7 +7,9 @@ Document Loader (PRODUCTION - HF API EMBEDDINGS)
 ✔ Incremental FAISS updates
 ✔ Handles PDF + DOCX
 """
-
+from langchain_core.embeddings import Embeddings
+import requests
+# import os
 import os
 import glob
 import json
@@ -26,7 +28,7 @@ DOCUMENTS_FOLDER = os.path.join(
 
 
 # ── CUSTOM HF EMBEDDINGS (LIGHTWEIGHT API) ───────────
-class HFAPIEmbeddings:
+class HFAPIEmbeddings(Embeddings):
     def __init__(self):
         self.api_key = os.getenv("HF_TOKEN")
         self.model = "sentence-transformers/all-MiniLM-L6-v2"
@@ -38,20 +40,26 @@ class HFAPIEmbeddings:
     def embed_query(self, text):
         return self._embed(text)
 
-    # ✅ ADD THIS (FIX)
-    def __call__(self, text):
-        return self.embed_query(text)
-
     def _embed(self, text):
-        headers = {"Authorization": f"Bearer {self.api_key}"}
-        response = requests.post(self.url, headers=headers, json={"inputs": text})
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json"
+        }
+
+        response = requests.post(
+            self.url,
+            headers=headers,
+            json={"inputs": text},
+            timeout=30
+        )
 
         if response.status_code != 200:
             raise Exception(f"HF API Error: {response.text}")
 
         data = response.json()
 
-        if isinstance(data[0], list):
+        # ✅ ensure correct vector format
+        if isinstance(data, list) and isinstance(data[0], list):
             return data[0]
 
         return data
