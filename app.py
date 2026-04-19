@@ -1,4 +1,7 @@
 import streamlit as st
+import warnings
+warnings.filterwarnings("ignore")
+
 import os
 import glob
 import base64

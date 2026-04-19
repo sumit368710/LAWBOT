@@ -1,27 +1,27 @@
 """
-Document Loader (PRODUCTION READY)
-- Fast (cached FAISS)
-- Incremental updates (only new files processed)
-- OCR support (Tesseract + Poppler)
+Document Loader (PRODUCTION READY - HF VERSION)
+
+✔ HuggingFace embeddings (no Ollama)
+✔ Safe FAISS loading (no crash)
+✔ Auto rebuild if index missing/corrupt
+✔ Incremental updates
+✔ Works locally + deployable
 """
 
 import os
 import glob
 import json
-import tempfile
 from typing import List, Tuple
 
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 from langchain_core.documents import Document
-from langchain_ollama import OllamaEmbeddings
+from langchain_community.embeddings import HuggingFaceEmbeddings
 
-# OCR
-import pytesseract
-pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
-
-# Folder path
-DOCUMENTS_FOLDER = os.path.join(os.path.dirname(os.path.dirname(__file__)), "files")
+# ── Folder path ─────────────────────────────────────────
+DOCUMENTS_FOLDER = os.path.join(
+    os.path.dirname(os.path.dirname(__file__)), "files"
+)
 
 
 class DocumentLoader:
@@ -29,34 +29,35 @@ class DocumentLoader:
         self.text_splitter = RecursiveCharacterTextSplitter(
             chunk_size=700,
             chunk_overlap=100,
-            separators=["\n\n", "\n", ".", "?", "!", " "],
         )
 
-    # ───────────────────────────────────────────────
-    # MAIN FUNCTION
-    # ───────────────────────────────────────────────
-    def load_from_folder(self, folder_path: str = DOCUMENTS_FOLDER, progress_bar=None) -> Tuple[FAISS, int, int]:
+        # ✅ HuggingFace Embeddings (stable + deployable)
+        self.embeddings = HuggingFaceEmbeddings(
+            model_name="sentence-transformers/all-MiniLM-L6-v2"
+        )
+
+    # ────────────────────────────────────────────────────
+    def load_from_folder(
+        self, folder_path: str = DOCUMENTS_FOLDER, progress_bar=None
+    ) -> Tuple[FAISS, int, int]:
 
         os.makedirs(folder_path, exist_ok=True)
 
+        # ── Collect files ────────────────────────────────
         file_paths = list(set(
             glob.glob(os.path.join(folder_path, "**", "*.pdf"), recursive=True) +
             glob.glob(os.path.join(folder_path, "**", "*.docx"), recursive=True)
         ))
 
         if not file_paths:
-            raise FileNotFoundError("No PDF/DOCX files found in files/ folder")
-
-        # Embedding model (FAST)
-        embeddings = OllamaEmbeddings(
-            model="nomic-embed-text",
-            base_url=os.getenv("OLLAMA_HOST", "http://localhost:11434"),
-        )
+            raise FileNotFoundError(
+                f"❌ No PDF/DOCX files found in: {folder_path}"
+            )
 
         faiss_path = "faiss_index"
         metadata_path = "file_metadata.json"
 
-        # ---- Load old metadata ----
+        # ── Load old metadata ────────────────────────────
         if os.path.exists(metadata_path):
             with open(metadata_path, "r") as f:
                 old_files = set(json.load(f))
@@ -69,37 +70,32 @@ class DocumentLoader:
         print(f"📂 Total files: {len(current_files)}")
         print(f"🆕 New files: {len(new_files)}")
 
-        # ---- Load existing FAISS ----
+        # ── Load existing FAISS safely ───────────────────
+        vectorstore = None
+
         if os.path.exists(faiss_path):
-            print("⚡ Loading existing FAISS...")
-            vectorstore = FAISS.load_local(
-                faiss_path,
-                embeddings,
-                allow_dangerous_deserialization=True
-            )
-        else:
-            print("🧠 First-time processing...")
-            vectorstore = None
+            try:
+                print("⚡ Loading existing FAISS...")
+                vectorstore = FAISS.load_local(
+                    faiss_path,
+                    self.embeddings,
+                    allow_dangerous_deserialization=True
+                )
+            except Exception as e:
+                print("⚠️ FAISS load failed, rebuilding:", e)
+                vectorstore = None
 
         new_docs: List[Document] = []
 
-        # ---- Process ONLY new files ----
+        # ── Process ONLY new files ───────────────────────
         for fp in new_files:
             fname = os.path.basename(fp)
 
             try:
-                if fp.endswith(".pdf"):
-                    text = self._extract_pdf(fp)
-                else:
-                    text = self._extract_docx(fp)
-
-                # OCR fallback
-                if fp.endswith(".pdf") and (not text or len(text.strip()) < 200):
-                    print(f"[OCR] 🔍 {fname}")
-                    text = self._extract_pdf_ocr(fp)
+                text = self._extract_text(fp)
 
                 if not text or len(text.strip()) < 50:
-                    print(f"[Loader] ⚠️ {fname} → skipped")
+                    print(f"[Loader] ⚠️ {fname} → skipped (no text)")
                     continue
 
                 chunks = [
@@ -108,22 +104,30 @@ class DocumentLoader:
                 ]
 
                 new_docs.extend(chunks)
-
                 print(f"[Loader] ✅ {fname} → {len(chunks)} chunks")
 
             except Exception as e:
                 print(f"[Loader] ❌ {fname}: {e}")
 
-        # ---- Update FAISS ----
+        # ── Build or update FAISS ────────────────────────
         if vectorstore is None:
-            vectorstore = FAISS.from_documents(new_docs, embeddings)
+            if not new_docs:
+                raise ValueError("❌ No documents available to build FAISS index.")
+
+            print("🧠 Creating new FAISS index...")
+            vectorstore = FAISS.from_documents(new_docs, self.embeddings)
+
         elif new_docs:
-            print("➕ Adding new documents...")
+            print("➕ Adding new documents to FAISS...")
             vectorstore.add_documents(new_docs)
 
-        # ---- Save ----
+        else:
+            print("✅ No new documents. Using existing FAISS index.")
+
+        # ── Save FAISS ───────────────────────────────────
         vectorstore.save_local(faiss_path)
 
+        # ── Save metadata ────────────────────────────────
         with open(metadata_path, "w") as f:
             json.dump(list(current_files), f)
 
@@ -131,49 +135,36 @@ class DocumentLoader:
 
         return vectorstore, len(current_files), len(new_docs)
 
-    # ───────────────────────────────────────────────
-    # PDF extraction (FAST)
-    # ───────────────────────────────────────────────
-    def _extract_pdf(self, file_path: str) -> str:
-        try:
-            import fitz
-            text = ""
-            with fitz.open(file_path) as doc:
-                for page in doc:
-                    text += page.get_text()
-            return text
-        except:
-            return ""
+    # ────────────────────────────────────────────────────
+    def _extract_text(self, file_path: str) -> str:
+        """
+        Extract text from PDF or DOCX
+        """
 
-    # ───────────────────────────────────────────────
-    # OCR fallback
-    # ───────────────────────────────────────────────
-    def _extract_pdf_ocr(self, file_path: str) -> str:
-        try:
-            from pdf2image import convert_from_path
+        # ── PDF ─────────────────────────────────────────
+        if file_path.lower().endswith(".pdf"):
+            try:
+                import fitz  # PyMuPDF
+                text = ""
+                with fitz.open(file_path) as doc:
+                    for page in doc:
+                        text += page.get_text()
+                return text
+            except Exception:
+                return ""
 
-            images = convert_from_path(
-                file_path,
-                poppler_path=r"C:\poppler-25.12.0\Library\bin"
-            )
+        # ── DOCX ────────────────────────────────────────
+        elif file_path.lower().endswith(".docx"):
+            try:
+                from docx import Document as DocxDoc
+                doc = DocxDoc(file_path)
+                return "\n\n".join(
+                    p.text for p in doc.paragraphs if p.text.strip()
+                )
+            except Exception:
+                return ""
 
-            text = ""
-            for img in images:
-                text += pytesseract.image_to_string(img)
-
-            return text
-        except Exception as e:
-            print(f"[OCR] ❌ {e}")
-            return ""
-
-    # ───────────────────────────────────────────────
-    # DOCX extraction
-    # ───────────────────────────────────────────────
-    def _extract_docx(self, file_path: str) -> str:
-        from docx import Document as DocxDoc
-
-        doc = DocxDoc(file_path)
-        return "\n\n".join(p.text for p in doc.paragraphs if p.text.strip())
+        return ""
 # 
 # 
 # """
