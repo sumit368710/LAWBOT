@@ -1,63 +1,95 @@
 """
-Document Loader (PRODUCTION READY - HF VERSION)
+Document Loader (PRODUCTION - HF API EMBEDDINGS)
 
-✔ HuggingFace embeddings (no Ollama)
-✔ Safe FAISS loading (no crash)
-✔ Auto rebuild if index missing/corrupt
-✔ Incremental updates
-✔ Works locally + deployable
+✔ Real embeddings (HuggingFace API)
+✔ No torch / no heavy install
+✔ Works on Streamlit Cloud
+✔ Incremental FAISS updates
+✔ Handles PDF + DOCX
 """
 
 import os
 import glob
 import json
+import requests
 from typing import List, Tuple
 
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_community.vectorstores import FAISS
 from langchain_core.documents import Document
-from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_community.vectorstores import FAISS
 
-# ── Folder path ─────────────────────────────────────────
+
+# ── PATH ─────────────────────────────────────────────
 DOCUMENTS_FOLDER = os.path.join(
     os.path.dirname(os.path.dirname(__file__)), "files"
 )
 
 
+# ── CUSTOM HF EMBEDDINGS (LIGHTWEIGHT API) ───────────
+class HFAPIEmbeddings:
+    def __init__(self):
+        self.api_key = os.getenv("HF_TOKEN")
+        self.model = "sentence-transformers/all-MiniLM-L6-v2"
+        self.url = f"https://api-inference.huggingface.co/pipeline/feature-extraction/{self.model}"
+
+    def embed_documents(self, texts):
+        return [self._embed(text) for text in texts]
+
+    def embed_query(self, text):
+        return self._embed(text)
+
+    def _embed(self, text):
+        headers = {"Authorization": f"Bearer {self.api_key}"}
+
+        response = requests.post(
+            self.url,
+            headers=headers,
+            json={"inputs": text},
+            timeout=30
+        )
+
+        if response.status_code != 200:
+            raise Exception(f"HF API Error: {response.text}")
+
+        data = response.json()
+
+        # Flatten embedding (important)
+        if isinstance(data[0], list):
+            return data[0]
+
+        return data
+
+
+# ── DOCUMENT LOADER ──────────────────────────────────
 class DocumentLoader:
     def __init__(self):
-        self.text_splitter = RecursiveCharacterTextSplitter(
+        self.splitter = RecursiveCharacterTextSplitter(
             chunk_size=700,
             chunk_overlap=100,
         )
 
-        # ✅ HuggingFace Embeddings (stable + deployable)
-        self.embeddings = HuggingFaceEmbeddings(
-            model_name="sentence-transformers/all-MiniLM-L6-v2"
-        )
+        # ✅ Use HF API embeddings (lightweight)
+        self.embeddings = HFAPIEmbeddings()
 
-    # ────────────────────────────────────────────────────
+    # ────────────────────────────────────────────────
     def load_from_folder(
-        self, folder_path: str = DOCUMENTS_FOLDER, progress_bar=None
+        self, folder_path: str = DOCUMENTS_FOLDER
     ) -> Tuple[FAISS, int, int]:
 
         os.makedirs(folder_path, exist_ok=True)
 
-        # ── Collect files ────────────────────────────────
         file_paths = list(set(
             glob.glob(os.path.join(folder_path, "**", "*.pdf"), recursive=True) +
             glob.glob(os.path.join(folder_path, "**", "*.docx"), recursive=True)
         ))
 
         if not file_paths:
-            raise FileNotFoundError(
-                f"❌ No PDF/DOCX files found in: {folder_path}"
-            )
+            raise FileNotFoundError("❌ No PDF/DOCX files found.")
 
         faiss_path = "faiss_index"
         metadata_path = "file_metadata.json"
 
-        # ── Load old metadata ────────────────────────────
+        # ── Load metadata ─────────────────────────────
         if os.path.exists(metadata_path):
             with open(metadata_path, "r") as f:
                 old_files = set(json.load(f))
@@ -70,24 +102,24 @@ class DocumentLoader:
         print(f"📂 Total files: {len(current_files)}")
         print(f"🆕 New files: {len(new_files)}")
 
-        # ── Load existing FAISS safely ───────────────────
+        # ── Load FAISS safely ─────────────────────────
         vectorstore = None
 
         if os.path.exists(faiss_path):
             try:
-                print("⚡ Loading existing FAISS...")
                 vectorstore = FAISS.load_local(
                     faiss_path,
                     self.embeddings,
                     allow_dangerous_deserialization=True
                 )
+                print("⚡ Loaded existing FAISS")
             except Exception as e:
-                print("⚠️ FAISS load failed, rebuilding:", e)
+                print("⚠️ FAISS load failed:", e)
                 vectorstore = None
 
         new_docs: List[Document] = []
 
-        # ── Process ONLY new files ───────────────────────
+        # ── Process new files only ───────────────────
         for fp in new_files:
             fname = os.path.basename(fp)
 
@@ -95,39 +127,41 @@ class DocumentLoader:
                 text = self._extract_text(fp)
 
                 if not text or len(text.strip()) < 50:
-                    print(f"[Loader] ⚠️ {fname} → skipped (no text)")
+                    print(f"[Loader] ⚠️ {fname} skipped")
                     continue
 
-                chunks = [
+                chunks = self.splitter.split_text(text)
+
+                docs = [
                     Document(page_content=chunk, metadata={"source": fname})
-                    for chunk in self.text_splitter.split_text(text)
+                    for chunk in chunks
                 ]
 
-                new_docs.extend(chunks)
-                print(f"[Loader] ✅ {fname} → {len(chunks)} chunks")
+                new_docs.extend(docs)
+                print(f"[Loader] ✅ {fname} → {len(docs)} chunks")
 
             except Exception as e:
                 print(f"[Loader] ❌ {fname}: {e}")
 
-        # ── Build or update FAISS ────────────────────────
+        # ── Create / update FAISS ────────────────────
         if vectorstore is None:
             if not new_docs:
-                raise ValueError("❌ No documents available to build FAISS index.")
+                raise ValueError("❌ No documents to create index.")
 
-            print("🧠 Creating new FAISS index...")
+            print("🧠 Creating FAISS index...")
             vectorstore = FAISS.from_documents(new_docs, self.embeddings)
 
         elif new_docs:
-            print("➕ Adding new documents to FAISS...")
+            print("➕ Adding new documents...")
             vectorstore.add_documents(new_docs)
 
         else:
-            print("✅ No new documents. Using existing FAISS index.")
+            print("✅ No new documents.")
 
-        # ── Save FAISS ───────────────────────────────────
+        # ── Save FAISS ───────────────────────────────
         vectorstore.save_local(faiss_path)
 
-        # ── Save metadata ────────────────────────────────
+        # ── Save metadata ────────────────────────────
         with open(metadata_path, "w") as f:
             json.dump(list(current_files), f)
 
@@ -135,29 +169,26 @@ class DocumentLoader:
 
         return vectorstore, len(current_files), len(new_docs)
 
-    # ────────────────────────────────────────────────────
-    def _extract_text(self, file_path: str) -> str:
-        """
-        Extract text from PDF or DOCX
-        """
+    # ────────────────────────────────────────────────
+    def _extract_text(self, path: str) -> str:
 
-        # ── PDF ─────────────────────────────────────────
-        if file_path.lower().endswith(".pdf"):
+        # ── PDF ─────────────────────────────────────
+        if path.lower().endswith(".pdf"):
             try:
-                import fitz  # PyMuPDF
+                import fitz
                 text = ""
-                with fitz.open(file_path) as doc:
+                with fitz.open(path) as doc:
                     for page in doc:
                         text += page.get_text()
                 return text
             except Exception:
                 return ""
 
-        # ── DOCX ────────────────────────────────────────
-        elif file_path.lower().endswith(".docx"):
+        # ── DOCX ────────────────────────────────────
+        elif path.lower().endswith(".docx"):
             try:
                 from docx import Document as DocxDoc
-                doc = DocxDoc(file_path)
+                doc = DocxDoc(path)
                 return "\n\n".join(
                     p.text for p in doc.paragraphs if p.text.strip()
                 )
