@@ -38,22 +38,19 @@ class HFAPIEmbeddings:
     def embed_query(self, text):
         return self._embed(text)
 
+    # ✅ ADD THIS (FIX)
+    def __call__(self, text):
+        return self.embed_query(text)
+
     def _embed(self, text):
         headers = {"Authorization": f"Bearer {self.api_key}"}
-
-        response = requests.post(
-            self.url,
-            headers=headers,
-            json={"inputs": text},
-            timeout=30
-        )
+        response = requests.post(self.url, headers=headers, json={"inputs": text})
 
         if response.status_code != 200:
             raise Exception(f"HF API Error: {response.text}")
 
         data = response.json()
 
-        # Flatten embedding (important)
         if isinstance(data[0], list):
             return data[0]
 
