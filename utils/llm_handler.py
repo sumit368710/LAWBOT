@@ -1,9 +1,14 @@
 import os
 from groq import Groq
+# import os
+import streamlit as st
+# from groq import Groq
 from langchain_core.prompts import PromptTemplate
 from langchain_community.vectorstores import FAISS
 
-client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+api_key = os.getenv("GROQ_API_KEY") or st.secrets.get("GROQ_API_KEY")
+
+client = Groq(api_key=api_key)
 
 # 🔥 Fast + free model
 MODEL = "llama-3.1-8b-instant"
