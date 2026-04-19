@@ -1,38 +1,51 @@
-"""
-Bhashini Handler
-- Translation : Bhashini Inference API
-- TTS         : Bhashini Inference API
-- Keys        : read from environment (Streamlit Secrets) — never from frontend
-"""
-
 import os
 import requests
-from typing import Optional
-import os
-from gtts import gTTS
-import io
-import requests
-import base64
-import time
 
-PIPELINE_URL        = "https://dhruva-api.bhashini.gov.in/services/inference/pipeline"
+PIPELINE_URL = "https://anuvaad-backend.bhashini.co.in/v1/pipeline"
+
 TRANSLATION_SERVICE = "ai4bharat/indictrans-v2-all-gpu--t4"
-TTS_SERVICE_INDIC   = "ai4bharat/indic-tts-coqui-indo_aryan-gpu--t4"
-TTS_SERVICE_EN      = "Bhashini/IITM/TTS"
+TTS_SERVICE_INDIC = "ai4bharat/indic-tts-coqui-indo_aryan-gpu--t4"
+TTS_SERVICE_EN = "Bhashini/IITM/TTS"
 
-SCRIPT_MAP = {
-    "hi": "Deva", "mr": "Deva", "bn": "Beng", "ta": "Taml",
-    "te": "Telu", "gu": "Gujr", "kn": "Knda", "ml": "Mlym",
-    "pa": "Guru", "ur": "Arab", "en": "Latn",
+# ✅ FULL LANGUAGE MAP (CDAC FORMAT)
+LANGUAGE_MAP = {
+    "en": "eng_Latn",
+    "hi": "hin_Deva",
+    "mr": "mar_Deva",
+    "bn": "ben_Beng",
+    "ta": "tam_Taml",
+    "te": "tel_Telu",
+    "gu": "guj_Gujr",
+    "kn": "kan_Knda",
+    "ml": "mal_Mlym",
+    "pa": "pan_Guru",
+    "ur": "urd_Arab"
 }
 
+SCRIPT_MAP = {
+    "eng_Latn": "Latn",
+    "hin_Deva": "Deva",
+    "mar_Deva": "Deva",
+    "ben_Beng": "Beng",
+    "tam_Taml": "Taml",
+    "tel_Telu": "Telu",
+    "guj_Gujr": "Gujr",
+    "kan_Knda": "Knda",
+    "mal_Mlym": "Mlym",
+    "pan_Guru": "Guru",
+    "urd_Arab": "Arab"
+}
+
+
 class BhashiniHandler:
+
     def __init__(self):
         self.api_key = os.getenv("BHASHINI_API_KEY", "")
+        print("API KEY:", self.api_key)
 
     def _headers(self):
         return {
-            "Authorization": self.api_key,
+            "Authorization": self.api_key,  # ✅ FIXED
             "Content-Type": "application/json",
         }
 
@@ -41,24 +54,36 @@ class BhashiniHandler:
 
     # ───────── TRANSLATION ─────────
     def translate(self, text, source_lang, target_lang):
-        if not self.is_ready() or source_lang == target_lang:
+
+        if not self.is_ready():
+            print("❌ API Key missing")
+            return text
+
+        src = LANGUAGE_MAP.get(source_lang)
+        tgt = LANGUAGE_MAP.get(target_lang)
+
+        if not src or not tgt or src == tgt:
             return text
 
         payload = {
-            "pipelineTasks": [{
-                "taskType": "translation",
-                "config": {
-                    "language": {
-                        "sourceLanguage": source_lang,
-                        "targetLanguage": target_lang,
-                        "sourceScriptCode": SCRIPT_MAP.get(source_lang, "Latn"),
-                        "targetScriptCode": SCRIPT_MAP.get(target_lang, "Latn"),
+            "pipelineTasks": [
+                {
+                    "taskType": "translation",
+                    "config": {
+                        "language": {
+                            "sourceLanguage": src,
+                            "targetLanguage": tgt,
+                            "sourceScriptCode": SCRIPT_MAP[src],
+                            "targetScriptCode": SCRIPT_MAP[tgt],
+                        },
+                        "serviceId": TRANSLATION_SERVICE,
                     },
-                    "serviceId": TRANSLATION_SERVICE,
-                },
-            }],
+                }
+            ],
             "inputData": {
-                "input": [{"source": text}]
+                "input": [
+                    {"source": text}
+                ]
             }
         }
 
@@ -70,6 +95,7 @@ class BhashiniHandler:
                 timeout=30
             )
             resp.raise_for_status()
+
             data = resp.json()
 
             return (
@@ -82,26 +108,41 @@ class BhashiniHandler:
             print("❌ Translation error:", e)
             return text
 
-    # ───────── TTS ─────────
-    def text_to_speech(self, text, lang="en", gender="female"):
+    # ───────── TEXT TO SPEECH ─────────
+    def text_to_speech(self, text, lang, gender="female"):
+
         if not self.is_ready():
+            print("❌ API Key missing")
             return None
 
+        lang_code = LANGUAGE_MAP.get(lang)
+
+        if not lang_code:
+            print("❌ Invalid language")
+            return None
+
+        service_id = TTS_SERVICE_EN if lang == "en" else TTS_SERVICE_INDIC
+
         payload = {
-            "pipelineTasks": [{
-                "taskType": "tts",
-                "config": {
-                    "language": {
-                        "sourceLanguage": lang,
-                        "sourceScriptCode": SCRIPT_MAP.get(lang, "Latn"),
-                    },
-                    "serviceId": TTS_SERVICE,
-                    "gender": gender,
+            "pipelineTasks": [
+                {
+                    "taskType": "tts",
+                    "config": {
+                        "language": {
+                            "sourceLanguage": lang_code,
+                            "sourceScriptCode": SCRIPT_MAP[lang_code]
+                        },
+                        "serviceId": service_id,
+                        "gender": gender
+                    }
                 }
-            }],
+            ],
             "inputData": {
-                "input": [{"source": text[:250]}],
-                "audio": [{"audioContent": None}]
+                "input": [
+                    {
+                        "text": text[:250]  # ✅ FIXED
+                    }
+                ]
             }
         }
 
@@ -125,6 +166,7 @@ class BhashiniHandler:
         except Exception as e:
             print("❌ TTS error:", e)
             return None
+
 
 # class BhashiniHandler:
 #     def __init__(self):
