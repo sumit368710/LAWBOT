@@ -32,26 +32,19 @@
 
 streamlit>=1.32.0
 
-# LangChain
 langchain>=0.1.0
 langchain-core>=0.1.0
 langchain-community>=0.0.20
 langchain-text-splitters>=0.0.1
 
-# Embeddings (VERY IMPORTANT)
-sentence-transformers
-transformers
-torch
+sentence-transformers==2.2.2
+transformers==4.36.2
+torch==2.1.2
 
-# Vector DB
-faiss-cpu>=1.7.4
+faiss-cpu==1.7.4
 
-# LLM (Groq)
 groq
 
-# PDF + DOCX
 pymupdf
 python-docx
-
-# Utils
 requests
