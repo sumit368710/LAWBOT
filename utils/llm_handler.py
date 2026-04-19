@@ -89,31 +89,50 @@ LLM Handler (PRODUCTION READY - GROQ VERSION)
 ✔ RAG support with FAISS
 """
 
+"""
+LLM Handler (FINAL - GROQ VERSION)
+
+✔ Works locally + Streamlit Cloud
+✔ Safe API key handling (no crash)
+✔ RAG support with FAISS
+✔ Clean error handling
+"""
+
 import os
 import streamlit as st
 from groq import Groq
 from langchain_core.prompts import PromptTemplate
 from langchain_community.vectorstores import FAISS
 
-# ── SAFE API KEY HANDLING ─────────────────────────────
+
+# ── GET API KEY SAFELY ───────────────────────────────
 def get_api_key():
-    return os.getenv("GROQ_API_KEY") or st.secrets.get("GROQ_API_KEY")
+    # Try environment variable first
+    key = os.getenv("GROQ_API_KEY")
+
+    # Fallback to Streamlit secrets
+    if not key:
+        try:
+            key = st.secrets["GROQ_API_KEY"]
+        except Exception:
+            key = None
+
+    return key
 
 
 api_key = get_api_key()
 
-if not api_key:
-    raise ValueError("❌ GROQ_API_KEY not found. Add it in Streamlit Secrets or environment.")
+# Create client only if key exists
+client = Groq(api_key=api_key) if api_key else None
 
-client = Groq(api_key=api_key)
 
-# ── MODEL (UPDATED GROQ MODEL) ────────────────────────
+# ── MODEL (UPDATED GROQ MODEL) ───────────────────────
 MODEL = "llama-3.1-8b-instant"
-# You can upgrade to:
+# Optional upgrade:
 # MODEL = "llama-3.1-70b-versatile"
 
 
-# ── PROMPTS ───────────────────────────────────────────
+# ── PROMPTS ─────────────────────────────────────────
 RAG_PROMPT = PromptTemplate.from_template(
     """You are LexBot, an expert Indian Legal AI Assistant.
 
@@ -145,7 +164,7 @@ Answer:"""
 )
 
 
-# ── LLM HANDLER ───────────────────────────────────────
+# ── LLM HANDLER ─────────────────────────────────────
 class LLMHandler:
     def __init__(self):
         self.vectorstore = None
@@ -154,6 +173,10 @@ class LLMHandler:
         self.vectorstore = vectorstore
 
     def _generate(self, prompt: str) -> str:
+        # If API key missing → show message (no crash)
+        if client is None:
+            return "⚠️ GROQ_API_KEY not configured. Please add it in Streamlit Secrets."
+
         try:
             response = client.chat.completions.create(
                 model=MODEL,
