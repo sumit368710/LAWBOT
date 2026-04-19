@@ -1,225 +1,106 @@
-# import os
-# from groq import Groq
-# # import os
-# import streamlit as st
-# # from groq import Groq
-# from langchain_core.prompts import PromptTemplate
-# from langchain_community.vectorstores import FAISS
-
-# api_key = os.getenv("GROQ_API_KEY") or st.secrets.get("GROQ_API_KEY")
-
-# client = Groq(api_key=api_key)
-
-# # 🔥 Fast + free model
-# MODEL = "llama-3.1-8b-instant"
-
-
-# RAG_PROMPT = PromptTemplate.from_template(
-#     """You are LexBot, an expert Indian Legal AI Assistant with deep knowledge of the Indian Constitution, IPC, CrPC, CPC, and all major Indian statutes.
-
-# Guidelines:
-# - Give clear, accurate, well-structured answers
-# - Cite relevant sections / articles where applicable
-# - Use bullet points for step-by-step processes
-# - Always remind users to consult a qualified lawyer for specific legal advice
-# - If unsure, say so rather than speculating
-
-# Context from legal documents:
-# {context}
-
-# Question: {question}
-
-# Answer (be thorough but concise):"""
-# )
-
-# GENERAL_PROMPT = PromptTemplate.from_template(
-#     """You are LexBot, an expert Indian Legal AI Assistant with deep knowledge of the Indian Constitution, IPC, CrPC, CPC, and all major Indian statutes.
-
-# Guidelines:
-# - Give clear, accurate, well-structured answers
-# - Cite relevant sections / articles where applicable
-# - Always remind users to consult a qualified lawyer for specific matters
-
-# Question: {question}
-
-# Answer:"""
-# )
-
-
-# class LLMHandler:
-#     def __init__(self):
-#         self.vectorstore = None
-
-#     def set_vectorstore(self, vectorstore: FAISS):
-#         self.vectorstore = vectorstore
-
-#     def _generate(self, prompt: str) -> str:
-#         try:
-#             response = client.chat.completions.create(
-#                 model=MODEL,
-#                 messages=[{"role": "user", "content": prompt}],
-#                 temperature=0.3,
-#                 max_tokens=512,
-#             )
-#             return response.choices[0].message.content
-
-#         except Exception as e:
-#             return f"⚠️ Groq Error: {str(e)}"
-
-#     def answer_with_docs(self, question: str) -> str:
-#         if not self.vectorstore:
-#             return self.answer_general(question)
-
-#         docs = self.vectorstore.similarity_search(question, k=2)
-#         context = "\n\n".join([d.page_content for d in docs])
-
-#         prompt = RAG_PROMPT.format(context=context, question=question)
-#         return self._generate(prompt)
-
-#     def answer_general(self, question: str) -> str:
-#         prompt = GENERAL_PROMPT.format(question=question)
-#         return self._generate(prompt)
-
 """
-LLM Handler (PRODUCTION READY - GROQ VERSION)
-
-✔ Works locally + Streamlit Cloud
-✔ Uses Groq API (fast + stable)
-✔ Safe API key handling
-✔ RAG support with FAISS
-"""
-
-"""
-LLM Handler (FINAL - GROQ VERSION)
-
-✔ Works locally + Streamlit Cloud
-✔ Safe API key handling (no crash)
-✔ RAG support with FAISS
-✔ Clean error handling
+LLM Handler
+- LLM      : Groq API  (llama3-8b-8192  — fast, free tier, cloud safe)
+- RAG      : similarity search on FAISS vectorstore
+- Cloud    : 100% HTTP — no local server needed
 """
 
 import os
-import streamlit as st
-from groq import Groq
-from langchain_core.prompts import PromptTemplate
+import requests
+from typing import Optional
 from langchain_community.vectorstores import FAISS
 
+GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
+GROQ_MODEL   = "llama-3.1-8b-instant"   # fast + free tier on Groq
 
-# ── GET API KEY SAFELY ───────────────────────────────
-def get_api_key():
-    # Try environment variable first
-    key = os.getenv("GROQ_API_KEY")
-
-    # Fallback to Streamlit secrets
-    if not key:
-        try:
-            key = st.secrets["GROQ_API_KEY"]
-        except Exception:
-            key = None
-
-    return key
-
-
-api_key = get_api_key()
-
-# Create client only if key exists
-client = Groq(api_key=api_key) if api_key else None
-
-
-# ── MODEL (UPDATED GROQ MODEL) ───────────────────────
-MODEL = "llama-3.1-8b-instant"
-# Optional upgrade:
-# MODEL = "llama-3.1-70b-versatile"
-
-
-# ── PROMPTS ─────────────────────────────────────────
-RAG_PROMPT = PromptTemplate.from_template(
-    """You are LexBot, an expert Indian Legal AI Assistant.
-
-Use the context to answer the question clearly.
+SYSTEM_PROMPT = """You are LexBot, an expert Indian Legal AI Assistant with deep knowledge of
+the Indian Constitution, IPC, CrPC, CPC, and all major Indian statutes.
 
 Guidelines:
-- Answer in your own words (do not copy directly)
-- Use bullet points where helpful
-- Cite relevant legal sections if available
-
-Context:
-{context}
-
-Question:
-{question}
-
-Answer:"""
-)
-
-GENERAL_PROMPT = PromptTemplate.from_template(
-    """You are a legal assistant.
-
-Answer clearly and concisely.
-
-Question:
-{question}
-
-Answer:"""
-)
+- Give clear, accurate, well-structured answers
+- Cite relevant sections and articles where applicable
+- Use bullet points for step-by-step processes
+- Always remind users to consult a qualified lawyer for specific legal advice
+- If unsure, say so — never make up law"""
 
 
-# ── LLM HANDLER ─────────────────────────────────────
 class LLMHandler:
     def __init__(self):
-        self.vectorstore = None
+        self.api_key = os.getenv("GROQ_API_KEY", "")
+        if not self.api_key:
+            raise ValueError(
+                "GROQ_API_KEY not found.\n"
+                "Add it to Streamlit Secrets:  GROQ_API_KEY = \"gsk_xxxx\"\n"
+                "Get a free key at: https://console.groq.com"
+            )
+        self.headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type":  "application/json",
+        }
+        self.vectorstore: Optional[FAISS] = None
 
     def set_vectorstore(self, vectorstore: FAISS):
         self.vectorstore = vectorstore
 
-    def _generate(self, prompt: str) -> str:
-        # If API key missing → show message (no crash)
-        if client is None:
-            return "⚠️ GROQ_API_KEY not configured. Please add it in Streamlit Secrets."
-
-        try:
-            response = client.chat.completions.create(
-                model=MODEL,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.2,
-                max_tokens=512,
-            )
-
-            content = response.choices[0].message.content
-
-            if not content or len(content.strip()) == 0:
-                return "⚠️ Model returned empty response. Try again."
-
-            return content
-
-        except Exception as e:
-            return f"⚠️ Groq Error: {str(e)}"
-
+    # ── RAG answer ────────────────────────────────────────────────────────────
     def answer_with_docs(self, question: str) -> str:
+        if not self.vectorstore:
+            return self.answer_general(question)
         try:
-            if not self.vectorstore:
-                return self.answer_general(question)
+            docs    = self.vectorstore.similarity_search(question, k=4)
+            context = "\n\n".join(d.page_content for d in docs)
+            sources = list({d.metadata.get("source", "Document") for d in docs})
 
-            docs = self.vectorstore.similarity_search(question, k=2)
+            user_msg = f"""Use the following context from legal documents to answer the question.
 
-            if not docs:
-                return self.answer_general(question)
+Context:
+{context}
 
-            context = "\n\n".join([d.page_content for d in docs])
+Question: {question}
 
-            prompt = RAG_PROMPT.format(
-                context=context,
-                question=question
-            )
+Answer (be thorough but concise):"""
 
-            return self._generate(prompt)
+            answer = self._call_groq(user_msg)
+
+            if sources:
+                src = ", ".join(f"📄 {s}" for s in sources)
+                answer += f"\n\n---\n*Sources: {src}*"
+
+            return answer
 
         except Exception as e:
-            return f"⚠️ Error: {str(e)}"
+            return f"⚠️ Error generating answer: {e}"
 
+    # ── General answer (no docs) ──────────────────────────────────────────────
     def answer_general(self, question: str) -> str:
+        return self._call_groq(question)
+
+    # ── Groq API call ─────────────────────────────────────────────────────────
+    def _call_groq(self, user_message: str) -> str:
+        payload = {
+            "model": GROQ_MODEL,
+            "messages": [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user",   "content": user_message},
+            ],
+            "temperature": 0.1,
+            "max_tokens":  1024,
+        }
         try:
-            prompt = GENERAL_PROMPT.format(question=question)
-            return self._generate(prompt)
+            resp = requests.post(
+                GROQ_API_URL,
+                headers=self.headers,
+                json=payload,
+                timeout=60,
+            )
+            if resp.status_code == 429:
+                return "⚠️ Groq rate limit hit. Please wait a moment and try again."
+            if resp.status_code != 200:
+                return f"⚠️ Groq API error ({resp.status_code}): {resp.text[:300]}"
+
+            return resp.json()["choices"][0]["message"]["content"]
+
+        except requests.exceptions.Timeout:
+            return "⚠️ Request timed out. Please try again."
         except Exception as e:
-            return f"⚠️ Error: {str(e)}"
+            return f"⚠️ LLM error: {e}"

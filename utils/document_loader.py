@@ -1,322 +1,528 @@
-"""
-Document Loader (PRODUCTION - HF API EMBEDDINGS)
-
-✔ Real embeddings (HuggingFace API)
-✔ No torch / no heavy install
-✔ Works on Streamlit Cloud
-✔ Incremental FAISS updates
-✔ Handles PDF + DOCX
-"""
-from langchain_core.embeddings import Embeddings
-import requests
-# import os
 import os
 import glob
 import json
-import requests
+import time
 from typing import List, Tuple
 
+import cohere
+from langchain_core.embeddings import Embeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_core.documents import Document
 from langchain_community.vectorstores import FAISS
 
+# ─────────────────────────────
+# PATHS
+# ─────────────────────────────
+BASE_DIR = os.path.dirname(os.path.dirname(__file__))
+DOCUMENTS_FOLDER = os.path.join(BASE_DIR, "files")
+FAISS_INDEX_PATH = "faiss_index"
+METADATA_PATH = "file_metadata.json"
 
-# ── PATH ─────────────────────────────────────────────
-DOCUMENTS_FOLDER = os.path.join(
-    os.path.dirname(os.path.dirname(__file__)), "files"
-)
+# OCR PATHS
+POPPLER_PATH = r"C:\poppler-25.12.0\Library\bin"
+TESSERACT_PATH = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
 
 
-# ── CUSTOM HF EMBEDDINGS (LIGHTWEIGHT API) ───────────
-class HFAPIEmbeddings(Embeddings):
+# ─────────────────────────────
+# COHERE EMBEDDINGS (SAFE)
+# ─────────────────────────────
+class CohereEmbeddings(Embeddings):
     def __init__(self):
-        self.api_key = os.getenv("HF_TOKEN")
-        self.model = "sentence-transformers/all-MiniLM-L6-v2"
-        self.url = f"https://api-inference.huggingface.co/models/{self.model}"
-        print("🔥 NEW HF EMBEDDING CODE LOADED")
+        api_key = os.getenv("COHERE_API_KEY")
+        if not api_key:
+            raise ValueError("❌ COHERE_API_KEY missing")
 
-    def embed_documents(self, texts):
-        return [self._embed(text) for text in texts]
+        self.client = cohere.Client(api_key)
+        self.model = "embed-english-v3.0"
+        self.cache = {}
 
-    def embed_query(self, text):
-        return self._embed(text)
+    # 🔥 SAFE RETRY
+    def _safe_embed(self, texts, input_type):
+        for attempt in range(5):
+            try:
+                return self.client.embed(
+                    texts=texts,
+                    model=self.model,
+                    input_type=input_type
+                )
+            except Exception as e:
+                print(f"⚠️ Rate limit hit (attempt {attempt+1})... retrying")
+                time.sleep(5)
 
-    def _embed(self, text):
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json"
-        }
+        raise Exception("❌ Embedding failed after retries")
 
-        response = requests.post(
-            self.url,
-            headers=headers,
-            json={
-                "inputs": text,
-                "options": {"wait_for_model": True}
-            },
-            timeout=60
-        )
+    # 🔥 DOCUMENT EMBEDDING (BATCH + DELAY)
+    def embed_documents(self, texts: List[str]) -> List[List[float]]:
+        batch_size = 20
+        all_embeddings = []
 
-        if response.status_code != 200:
-            raise Exception(f"HF API Error: {response.text}")
+        for i in range(0, len(texts), batch_size):
+            batch = texts[i:i + batch_size]
 
-        data = response.json()
+            response = self._safe_embed(batch, "search_document")
+            all_embeddings.extend(response.embeddings)
 
-        # flatten embedding
-        if isinstance(data, list) and isinstance(data[0], list):
-            return data[0]
+            time.sleep(1)  # 🔥 VERY IMPORTANT (rate limit control)
 
-        return data
+        return all_embeddings
+
+    # 🔥 QUERY EMBEDDING (CACHE)
+    def embed_query(self, text: str) -> List[float]:
+        if text in self.cache:
+            return self.cache[text]
+
+        response = self._safe_embed([text], "search_query")
+
+        emb = response.embeddings[0]
+        self.cache[text] = emb
+        return emb
 
 
-# ── DOCUMENT LOADER ──────────────────────────────────
+# ─────────────────────────────
+# DOCUMENT LOADER
+# ─────────────────────────────
 class DocumentLoader:
     def __init__(self):
         self.splitter = RecursiveCharacterTextSplitter(
             chunk_size=700,
             chunk_overlap=100,
         )
+        self.embeddings = CohereEmbeddings()
 
-        # ✅ Use HF API embeddings (lightweight)
-        self.embeddings = HFAPIEmbeddings()
-
-    # ────────────────────────────────────────────────
-    def load_from_folder(
-        self, folder_path: str = DOCUMENTS_FOLDER
-    ) -> Tuple[FAISS, int, int]:
+    def load_from_folder(self, folder_path=DOCUMENTS_FOLDER) -> Tuple[FAISS, int, int]:
 
         os.makedirs(folder_path, exist_ok=True)
 
-        file_paths = list(set(
+        files = list(set(
             glob.glob(os.path.join(folder_path, "**", "*.pdf"), recursive=True) +
             glob.glob(os.path.join(folder_path, "**", "*.docx"), recursive=True)
         ))
 
-        if not file_paths:
-            raise FileNotFoundError("❌ No PDF/DOCX files found.")
+        if not files:
+            raise FileNotFoundError("❌ No documents found")
 
-        faiss_path = "faiss_index"
-        metadata_path = "file_metadata.json"
-
-        # ── Load metadata ─────────────────────────────
-        if os.path.exists(metadata_path):
-            with open(metadata_path, "r") as f:
+        # ── LOAD CACHE
+        old_files = set()
+        if os.path.exists(METADATA_PATH):
+            with open(METADATA_PATH, "r") as f:
                 old_files = set(json.load(f))
-        else:
-            old_files = set()
 
-        current_files = set(file_paths)
+        current_files = set(files)
         new_files = current_files - old_files
 
-        print(f"📂 Total files: {len(current_files)}")
-        print(f"🆕 New files: {len(new_files)}")
+        print(f"\n📂 Total Files: {len(current_files)} | 🆕 New Files: {len(new_files)}\n")
 
-        # ── Load FAISS safely ─────────────────────────
+        # ── LOAD EXISTING INDEX
         vectorstore = None
-
-        if os.path.exists(faiss_path):
+        if os.path.exists(FAISS_INDEX_PATH):
             try:
                 vectorstore = FAISS.load_local(
-                    faiss_path,
+                    FAISS_INDEX_PATH,
                     self.embeddings,
                     allow_dangerous_deserialization=True
                 )
-                print("⚡ Loaded existing FAISS")
-            except Exception as e:
-                print("⚠️ FAISS load failed:", e)
+                print("✅ Loaded existing FAISS index")
+            except:
+                print("⚠️ Failed to load FAISS, rebuilding...")
+                new_files = current_files
                 vectorstore = None
 
-        new_docs: List[Document] = []
+        new_docs = []
 
-        # ── Process new files only ───────────────────
+        # ── PROCESS ONLY NEW FILES
         for fp in new_files:
             fname = os.path.basename(fp)
+            print(f"\n🔍 Processing: {fname}")
 
-            try:
-                text = self._extract_text(fp)
+            text = self._extract_text(fp)
 
-                if not text or len(text.strip()) < 50:
-                    print(f"[Loader] ⚠️ {fname} skipped")
-                    continue
+            if not text.strip():
+                print(f"❌ Empty file: {fname}")
+                continue
 
-                chunks = self.splitter.split_text(text)
+            chunks = self.splitter.split_text(text)
 
-                docs = [
-                    Document(page_content=chunk, metadata={"source": fname})
-                    for chunk in chunks
-                ]
+            docs = [
+                Document(page_content=c, metadata={"source": fname})
+                for c in chunks
+            ]
 
-                new_docs.extend(docs)
-                print(f"[Loader] ✅ {fname} → {len(docs)} chunks")
+            new_docs.extend(docs)
+            print(f"✅ Processed: {fname} | Chunks: {len(chunks)}")
 
-            except Exception as e:
-                print(f"[Loader] ❌ {fname}: {e}")
-
-        # ── Create / update FAISS ────────────────────
+        # ── BUILD / UPDATE FAISS
         if vectorstore is None:
             if not new_docs:
-                raise ValueError("❌ No documents to create index.")
+                raise ValueError("❌ No documents to index")
 
-            print("🧠 Creating FAISS index...")
             vectorstore = FAISS.from_documents(new_docs, self.embeddings)
+            print("\n🆕 Created new FAISS index")
 
         elif new_docs:
-            print("➕ Adding new documents...")
             vectorstore.add_documents(new_docs)
+            print("\n➕ Added new documents")
 
         else:
-            print("✅ No new documents.")
+            print("\n⚡ No new documents — skipped embedding")
 
-        # ── Save FAISS ───────────────────────────────
-        vectorstore.save_local(faiss_path)
+        # ── SAVE CACHE
+        vectorstore.save_local(FAISS_INDEX_PATH)
 
-        # ── Save metadata ────────────────────────────
-        with open(metadata_path, "w") as f:
+        with open(METADATA_PATH, "w") as f:
             json.dump(list(current_files), f)
-
-        print("✅ Knowledge base ready!")
 
         return vectorstore, len(current_files), len(new_docs)
 
-    # ────────────────────────────────────────────────
+    # ─────────────────────────────
+    # EXTRACTION
+    # ─────────────────────────────
     def _extract_text(self, path: str) -> str:
+        if path.endswith(".pdf"):
+            return self._extract_pdf(path)
+        return self._extract_docx(path)
 
-        # ── PDF ─────────────────────────────────────
-        if path.lower().endswith(".pdf"):
-            try:
-                import fitz
-                text = ""
-                with fitz.open(path) as doc:
-                    for page in doc:
-                        text += page.get_text()
+    def _extract_pdf(self, path: str) -> str:
+        try:
+            import fitz
+            text = ""
+            with fitz.open(path) as doc:
+                for p in doc:
+                    text += p.get_text()
+
+            if text.strip():
+                print("📄 Extracted via PyMuPDF")
                 return text
-            except Exception:
-                return ""
+        except:
+            pass
 
-        # ── DOCX ────────────────────────────────────
-        elif path.lower().endswith(".docx"):
-            try:
-                from docx import Document as DocxDoc
-                doc = DocxDoc(path)
-                return "\n\n".join(
-                    p.text for p in doc.paragraphs if p.text.strip()
-                )
-            except Exception:
-                return ""
+        print("🔍 Using OCR...")
+
+        try:
+            from pdf2image import convert_from_path
+            import pytesseract
+
+            pytesseract.pytesseract.tesseract_cmd = TESSERACT_PATH
+
+            images = convert_from_path(path, poppler_path=POPPLER_PATH)
+
+            text = ""
+            for img in images:
+                text += pytesseract.image_to_string(img)
+
+            if text.strip():
+                print("✅ OCR Success")
+                return text
+
+        except Exception as e:
+            print(f"❌ OCR failed: {e}")
 
         return ""
-# 
-# 
-# """
-# Document Loader
-# Auto-loads all PDF and DOCX files from the  files/  folder at startup.
-# """
-# import io
+
+    def _extract_docx(self, path: str) -> str:
+        try:
+            from docx import Document as DocxDoc
+
+            doc = DocxDoc(path)
+            text_parts = []
+
+            for p in doc.paragraphs:
+                if p.text.strip():
+                    text_parts.append(p.text)
+
+            for table in doc.tables:
+                for row in table.rows:
+                    for cell in row.cells:
+                        if cell.text.strip():
+                            text_parts.append(cell.text)
+
+            text = "\n\n".join(text_parts)
+
+            if text.strip():
+                print("📄 DOCX extracted")
+                return text
+
+        except Exception as e:
+            print(f"❌ DOCX failed: {e}")
+
+        return ""
+
+
 # import os
 # import glob
-# import tempfile
+# import json
+# import time
+# import requests
 # from typing import List, Tuple
+# import logging
+# logging.getLogger("pymupdf").setLevel(logging.ERROR)
 
+# from langchain.embeddings import HuggingFaceEmbeddings
+
+# from langchain_core.embeddings import Embeddings
 # from langchain_text_splitters import RecursiveCharacterTextSplitter
-# from langchain_community.vectorstores import FAISS
-# from langchain_community.embeddings import OllamaEmbeddings
 # from langchain_core.documents import Document
+# from langchain_community.vectorstores import FAISS
+# import pytesseract
 
-# # ── Folder where you place your legal documents ───────────────────────────────
+# pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+# print(pytesseract.get_tesseract_version())
+
+# # ── PATHS ───────────────────────────────────────────
 # DOCUMENTS_FOLDER = os.path.join(os.path.dirname(os.path.dirname(__file__)), "files")
+# FAISS_INDEX_PATH = "faiss_index"
+# METADATA_PATH = "file_metadata.json"
+
+# HF_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
+# HF_API_URL = f"https://api-inference.huggingface.co/models/{HF_MODEL}"
+
+# # 👉 SET YOUR POPPLER PATH HERE
+# POPPLER_PATH = r"C:\poppler-25.12.0\Library\bin"
+# print("✅ OCR pipeline working")
 
 
+# # ════════════════════════════════════════════════════
+# # EMBEDDINGS
+# # ════════════════════════════════════════════════════
+# class HFAPIEmbeddings(Embeddings):
+#     def __init__(self):
+#         self.api_key = os.getenv("HF_TOKEN", "")
+#         if not self.api_key:
+#             raise ValueError("❌ HF_TOKEN missing")
+
+#         self.headers = {
+#             "Authorization": f"Bearer {self.api_key}",
+#             "Content-Type": "application/json",
+#         }
+
+#     def embed_documents(self, texts: List[str]) -> List[List[float]]:
+#         return [self._embed(t) for t in texts]
+
+#     def embed_query(self, text: str) -> List[float]:
+#         return self._embed(text)
+
+#     def _embed(self, text: str, retries: int = 3) -> List[float]:
+#         payload = {
+#             "inputs": text[:512],
+#             "options": {"wait_for_model": True},
+#         }
+
+#         for _ in range(retries):
+#             r = requests.post(HF_API_URL, headers=self.headers, json=payload, timeout=60)
+
+#             if r.status_code == 200:
+#                 data = r.json()
+
+#                 if isinstance(data[0], list):
+#                     if isinstance(data[0][0], list):
+#                         return data[0][0]
+#                     return data[0]
+
+#                 return data
+
+#             time.sleep(2)
+
+#         raise Exception(f"HF Error: {r.text}")
+
+
+# # ════════════════════════════════════════════════════
+# # DOCUMENT LOADER
+# # ════════════════════════════════════════════════════
 # class DocumentLoader:
 #     def __init__(self):
-#         self.text_splitter = RecursiveCharacterTextSplitter(
-#             chunk_size=800,
+#         self.splitter = RecursiveCharacterTextSplitter(
+#             chunk_size=700,
 #             chunk_overlap=100,
-#             separators=["\n\n", "\n", ".", "?", "!", " "],
 #         )
+#         self.embeddings = HFAPIEmbeddings()
 
-#     # ── Load all docs from backend folder ────────────────────────────────────
-#     def load_from_folder(self, folder_path: str = DOCUMENTS_FOLDER, progress_bar=None) -> Tuple[FAISS, int, int]:
-#         """
-#         Scans folder_path (and its subfolders) for PDF / DOCX files,
-#         extracts text, chunks it, and returns a FAISS vectorstore.
-#         """
+#     def load_from_folder(self, folder_path=DOCUMENTS_FOLDER) -> Tuple[FAISS, int, int]:
+
 #         os.makedirs(folder_path, exist_ok=True)
 
-#         file_paths = list(set(
-#             glob.glob(os.path.join(folder_path, "**", "*.pdf"),  recursive=True) +
-#             glob.glob(os.path.join(folder_path, "**", "*.docx"), recursive=True) +
-#             glob.glob(os.path.join(folder_path, "**", "*.doc"),  recursive=True)
+#         files = list(set(
+#             glob.glob(os.path.join(folder_path, "**", "*.pdf"), recursive=True) +
+#             glob.glob(os.path.join(folder_path, "**", "*.docx"), recursive=True)
 #         ))
 
-#         if not file_paths:
-#             raise FileNotFoundError(
-#                 f"No PDF or DOCX files found in: {folder_path}\n"
-#                 f"Please add your legal documents to that folder."
-#             )
+#         if not files:
+#             raise FileNotFoundError("❌ No documents found")
 
-#         all_docs: List[Document] = []
-#         total = len(file_paths)
+#         # ── Load metadata (avoid re-embedding)
+#         old_files = set()
+#         if os.path.exists(METADATA_PATH):
+#             with open(METADATA_PATH, "r") as f:
+#                 old_files = set(json.load(f))
 
-#         for idx, fp in enumerate(file_paths):
-#             fname = os.path.basename(fp)
+#         current_files = set(files)
+#         new_files = current_files - old_files
+
+#         print(f"\n📂 Total Files: {len(current_files)} | 🆕 New Files: {len(new_files)}\n")
+
+#         # ── Load FAISS if exists
+#         vectorstore = None
+#         if os.path.exists(FAISS_INDEX_PATH):
 #             try:
-#                 with open(fp, "rb") as f:
-#                     raw = f.read()
-#                 if fp.lower().endswith(".pdf"):
-#                     text = self._extract_pdf(raw)
-#                 else:
-#                     text = self._extract_docx(raw)
-
-#                 split_texts = self.text_splitter.split_text(text)
-#                 chunks = self.text_splitter.create_documents(
-#                     [text],
-#                     metadatas=[{"source": fname}] * len(split_texts),
+#                 vectorstore = FAISS.load_local(
+#                     FAISS_INDEX_PATH,
+#                     self.embeddings,
+#                     allow_dangerous_deserialization=True
 #                 )
-#                 all_docs.extend(chunks)
-#                 print(f"[Loader] ✅ {fname}  →  {len(chunks)} chunks")
-#             except Exception as e:
-#                 print(f"[Loader] ❌ {fname}: {e}")
+#                 print("✅ Loaded existing FAISS index")
+#             except:
+#                 print("⚠️ Failed to load FAISS, rebuilding...")
+#                 vectorstore = None
+#                 new_files = current_files
 
-#             if progress_bar:
-#                 progress_bar.progress(int((idx + 1) / total * 85), text=f"Processing {fname}…")
+#         new_docs = []
 
-#         if not all_docs:
-#             raise ValueError("No text could be extracted from any document.")
+#         # ── Process ONLY NEW FILES
+#         for fp in new_files:
+#             fname = os.path.basename(fp)
 
-#         embeddings  = OllamaEmbeddings(
-#             model="llama3.1:8b",
-#             base_url=os.getenv("OLLAMA_HOST", "http://localhost:11434"),
-#         )
-#         vectorstore = FAISS.from_documents(all_docs, embeddings)
+#             print(f"\n🔍 Processing: {fname}")
 
-#         if progress_bar:
-#             progress_bar.progress(100, text="Knowledge base ready!")
+#             text = self._extract_text(fp)
 
-#         return vectorstore, total, len(all_docs)
+#             if not text or len(text.strip()) < 50:
+#                 print(f"❌ Skipped (no readable text): {fname}")
+#                 continue
 
-#     # ── PDF extractor ─────────────────────────────────────────────────────────
-#     def _extract_pdf(self, raw: bytes) -> str:
+#             chunks = self.splitter.split_text(text)
+
+#             docs = [
+#                 Document(page_content=c, metadata={"source": fname})
+#                 for c in chunks
+#             ]
+
+#             new_docs.extend(docs)
+
+#             print(f"✅ Processed: {fname} | Chunks: {len(chunks)}")
+
+#         # ── Build / Update FAISS
+#         if vectorstore is None:
+#             if not new_docs:
+#                 raise ValueError("❌ No documents to index")
+#             vectorstore = FAISS.from_documents(new_docs, self.embeddings)
+#             print("\n🆕 Created new FAISS index")
+
+#         elif new_docs:
+#             vectorstore.add_documents(new_docs)
+#             print("\n➕ Added new documents to FAISS")
+
+#         else:
+#             print("\n⚡ No new documents — skipped embedding")
+
+#         # ── Save
+#         vectorstore.save_local(FAISS_INDEX_PATH)
+
+#         with open(METADATA_PATH, "w") as f:
+#             json.dump(list(current_files), f)
+
+#         return vectorstore, len(current_files), len(new_docs)
+
+#     # ════════════════════════════════════════════════
+#     # EXTRACTION
+#     # ════════════════════════════════════════════════
+#     def _extract_text(self, path: str) -> str:
+#         if path.endswith(".pdf"):
+#             return self._extract_pdf(path)
+#         return self._extract_docx(path)
+
+#     def _extract_pdf(self, path: str) -> str:
+
+#         # 1. PyMuPDF
+#         try:
+#             import fitz
+#             text = ""
+#             with fitz.open(path) as doc:
+#                 for p in doc:
+#                     text += p.get_text()
+#             if len(text.strip()) > 50:
+#                 print("📄 Extracted via PyMuPDF")
+#                 return text
+#         except:
+#             pass
+
+#         # 2. pdfplumber
 #         try:
 #             import pdfplumber
 #             parts = []
-#             with pdfplumber.open(io.BytesIO(raw)) as pdf:
-#                 for page in pdf.pages:
-#                     t = page.extract_text()
+#             with pdfplumber.open(path) as pdf:
+#                 for p in pdf.pages:
+#                     t = p.extract_text()
 #                     if t:
 #                         parts.append(t)
-#             return "\n\n".join(parts)
-#         except Exception:
-#             from pypdf import PdfReader
-#             reader = PdfReader(io.BytesIO(raw))
-#             return "\n\n".join(p.extract_text() or "" for p in reader.pages)
+#             text = "\n\n".join(parts)
+#             if len(text.strip()) > 50:
+#                 print("📄 Extracted via pdfplumber")
+#                 return text
+#         except:
+#             pass
 
-#     # ── DOCX extractor ────────────────────────────────────────────────────────
-#     def _extract_docx(self, raw: bytes) -> str:
-#         from docx import Document as DocxDoc
-#         with tempfile.NamedTemporaryFile(suffix=".docx", delete=False) as tmp:
-#             tmp.write(raw)
-#             tmp_path = tmp.name
-#         doc  = DocxDoc(tmp_path)
-#         text = "\n\n".join(p.text for p in doc.paragraphs if p.text.strip())
-#         os.unlink(tmp_path)
-#         return text
+#         # 3. pypdf
+#         try:
+#             from pypdf import PdfReader
+#             reader = PdfReader(path)
+#             text = "\n\n".join(p.extract_text() or "" for p in reader.pages)
+#             if len(text.strip()) > 50:
+#                 print("📄 Extracted via pypdf")
+#                 return text
+#         except:
+#             pass
+
+#         # 4. OCR
+#         print("🔍 Using OCR...")
+
+#         try:
+#             from pdf2image import convert_from_path
+#             import pytesseract
+
+#             images = convert_from_path(path, poppler_path=POPPLER_PATH)
+
+#             text = ""
+#             for img in images:
+#                 text += pytesseract.image_to_string(img)
+
+#             if len(text.strip()) > 50:
+#                 print("✅ OCR Success")
+#                 return text
+#             else:
+#                 print("⚠️ OCR weak result")
+
+#         except Exception as e:
+#             print(f"❌ OCR failed: {e}")
+
+#         return ""
+
+#     def _extract_docx(self, path: str) -> str:
+#         try:
+#             from docx import Document as DocxDoc
+
+#             doc = DocxDoc(path)
+#             text_parts = []
+
+#             # ── 1. Paragraphs ───────────────
+#             for p in doc.paragraphs:
+#                 if p.text.strip():
+#                     text_parts.append(p.text.strip())
+
+#             # ── 2. Tables (IMPORTANT FIX) ───
+#             for table in doc.tables:
+#                 for row in table.rows:
+#                     for cell in row.cells:
+#                         if cell.text.strip():
+#                             text_parts.append(cell.text.strip())
+
+#             full_text = "\n\n".join(text_parts)
+
+#             if full_text.strip():
+#                 print("📄 DOCX extracted (paragraphs + tables)")
+#             else:
+#                 print("⚠️ DOCX has no readable content")
+
+#             return full_text
+
+#         except Exception as e:
+#             print(f"❌ DOCX failed: {e}")
+#             return ""
+
