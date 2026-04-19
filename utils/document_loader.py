@@ -32,7 +32,7 @@ class HFAPIEmbeddings(Embeddings):
     def __init__(self):
         self.api_key = os.getenv("HF_TOKEN")
         self.model = "sentence-transformers/all-MiniLM-L6-v2"
-        self.url = f"https://api-inference.huggingface.co/pipeline/feature-extraction/{self.model}"
+        self.url = f"https://api-inference.huggingface.co/models/{self.model}"
 
     def embed_documents(self, texts):
         return [self._embed(text) for text in texts]
@@ -49,8 +49,11 @@ class HFAPIEmbeddings(Embeddings):
         response = requests.post(
             self.url,
             headers=headers,
-            json={"inputs": text},
-            timeout=30
+            json={
+                "inputs": text,
+                "options": {"wait_for_model": True}
+            },
+            timeout=60
         )
 
         if response.status_code != 200:
@@ -58,7 +61,7 @@ class HFAPIEmbeddings(Embeddings):
 
         data = response.json()
 
-        # ✅ ensure correct vector format
+        # flatten embedding
         if isinstance(data, list) and isinstance(data[0], list):
             return data[0]
 
