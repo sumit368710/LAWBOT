@@ -172,15 +172,21 @@ if not st.session_state.docs_loaded and st.session_state.load_error is None:
     with st.spinner("📚 Loading legal knowledge base from `files/` folder…"):
         try:
             progress = st.progress(0, text="Scanning documents…")
-            vs, dc, cc = doc_loader.load_from_folder(DOCUMENTS_FOLDER, progress)
+
+            # ✅ FIXED LINE (removed progress argument)
+            vs, dc, cc = doc_loader.load_from_folder(DOCUMENTS_FOLDER)
+
             st.session_state.update({
                 "vectorstore": vs, "docs_loaded": True,
                 "doc_count": dc,   "chunk_count": cc,
             })
             llm_handler.set_vectorstore(vs)
+
             progress.empty()
+
         except FileNotFoundError as e:
             st.session_state.load_error = str(e)
+
         except Exception as e:
             st.session_state.load_error = f"Unexpected error: {e}"
 
