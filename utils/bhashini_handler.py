@@ -3,7 +3,6 @@ import base64
 import io
 import tempfile
 from groq import Groq
-from pydub import AudioSegment
 from gtts import gTTS
 import speech_recognition as sr
 
@@ -62,23 +61,27 @@ def split_text(text, max_chars=190):
 # =========================
 # AUDIO → 16k WAV
 # =========================
+# def ensure_16k_wav_bytes(b64):
+
+#     audio_bytes = base64.b64decode(b64)
+
+#     audio = AudioSegment.from_file(io.BytesIO(audio_bytes))
+
+#     audio = (
+#         audio
+#         .set_frame_rate(16000)
+#         .set_channels(1)
+#         .set_sample_width(2)
+#     )
+
+#     buf = io.BytesIO()
+#     audio.export(buf, format="wav", codec="pcm_s16le")
+
+#     return buf.getvalue()
 def ensure_16k_wav_bytes(b64):
-
-    audio_bytes = base64.b64decode(b64)
-
-    audio = AudioSegment.from_file(io.BytesIO(audio_bytes))
-
-    audio = (
-        audio
-        .set_frame_rate(16000)
-        .set_channels(1)
-        .set_sample_width(2)
-    )
-
-    buf = io.BytesIO()
-    audio.export(buf, format="wav", codec="pcm_s16le")
-
-    return buf.getvalue()
+    if "," in b64:
+        b64 = b64.split(",")[1]
+    return base64.b64decode(b64)
 
 
 # =========================
