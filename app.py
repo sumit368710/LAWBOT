@@ -4,7 +4,7 @@ import streamlit as st
 
 from utils.document_loader import DocumentLoader, DOCUMENTS_FOLDER
 from utils.llm_handler import LLMHandler
-from utils.bhashini_handler import BhashiniHandler
+from utils.bhashini_handler import SpeechHandler
 
 
 # =========================
@@ -70,16 +70,16 @@ if "last_audio" not in st.session_state:
 @st.cache_resource
 def load_all():
     llm = LLMHandler()
-    bhashini = BhashiniHandler()
+    speech_handler = SpeechHandler()
     loader = DocumentLoader()
 
     vs, _, _ = loader.load_from_folder(DOCUMENTS_FOLDER)
     llm.set_vectorstore(vs)
 
-    return llm, bhashini
+    return llm, speech_handler
 
 
-llm, bhashini = load_all()
+llm, speech_handler = load_all()
 
 
 # =========================
@@ -128,8 +128,8 @@ for i, msg in enumerate(st.session_state.messages):
 
                     tgt = LANG_MAP[st.session_state.lang]
 
-                    audio = bhashini.text_to_speech(
-                        msg["content"], tgt, st.session_state.gender
+                    audio = speech_handler.text_to_speech(
+                        msg["content"]
                     )
 
                     st.session_state.messages[i]["audio"] = audio
@@ -140,7 +140,7 @@ for i, msg in enumerate(st.session_state.messages):
                 st.success(msg["translated"])
 
             if msg.get("audio"):
-                st.audio(base64.b64decode(msg["audio"]))
+                st.audio(msg["audio"], format="audio/mp3")
 
 
 # =========================
@@ -171,7 +171,7 @@ if audio_data:
     audio_b64 = base64.b64encode(audio_bytes).decode()
     src_lang = LANG_MAP[st.session_state.lang]
 
-    text = bhashini.speech_to_text(audio_b64, src_lang)
+    text = speech_handler.speech_to_text(audio_b64)
 
     if text and text.strip():
 
@@ -189,7 +189,7 @@ if audio_data:
         tgt = LANG_MAP[st.session_state.lang]
 
         if tgt != "eng_Latn":
-            answer = bhashini.translate(answer, "eng_Latn", tgt)
+            answer = speech_handler.translate(answer, "eng_Latn", tgt)
 
         st.session_state.messages.append({
             "role": "assistant",
@@ -216,7 +216,7 @@ if user_input:
     tgt = LANG_MAP[st.session_state.lang]
 
     if tgt != "eng_Latn":
-        answer = bhashini.translate(answer, "eng_Latn", tgt)
+        answer = speech_handler.translate(answer, "eng_Latn", tgt)
 
     st.session_state.messages.append({
         "role": "assistant",
