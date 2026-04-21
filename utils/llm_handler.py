@@ -140,7 +140,7 @@ Question:
                 {"role": "user",   "content": user_msg},
             ],
             "temperature": 0.0,   # 🔥 critical
-            "max_tokens": 800,
+            "max_tokens": 2000,
         }
 
         try:
