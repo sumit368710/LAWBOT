@@ -115,7 +115,7 @@ for i, msg in enumerate(st.session_state.messages):
 
                     tgt = LANG_MAP[st.session_state.lang]
 
-                    translated = bhashini.translate(
+                    translated = speech_handler.translate(
                         msg["content"], "eng_Latn", tgt
                     )
 
