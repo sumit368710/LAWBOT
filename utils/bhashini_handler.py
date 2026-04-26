@@ -106,7 +106,7 @@ def groq_stt(audio_base64):
                 file=file,
                 model="whisper-large-v3-turbo",
                 response_format="json",
-                language="en",
+                language=None,
                 temperature=0.0
             )
 

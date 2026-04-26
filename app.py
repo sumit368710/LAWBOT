@@ -1,44 +1,68 @@
+# app.py
+# FINAL CLEAN VERSION
+# - No microphone input
+# - Text chat only
+# - Uses FAISS knowledge base (PDF + DOCX + YouTube transcripts)
+# - Translation button
+# - Audio output button
+# - Streamlit optimized
+
 import os
-import base64
 import streamlit as st
 
-from utils.document_loader import DocumentLoader, DOCUMENTS_FOLDER
+from langchain_community.vectorstores import FAISS
+
+from utils.document_loader import DocumentLoader
 from utils.llm_handler import LLMHandler
 from utils.bhashini_handler import SpeechHandler
 
 
-# =========================
-# CONFIG
-# =========================
-st.set_page_config(page_title="LexBot", page_icon="⚖️", layout="centered")
+# =====================================================
+# PAGE CONFIG
+# =====================================================
+st.set_page_config(
+    page_title="LexBot",
+    page_icon="⚖️",
+    layout="centered"
+)
 
+
+# =====================================================
+# SECRETS / ENV
+# =====================================================
 os.environ["BHASHINI_API_KEY"] = st.secrets.get("BHASHINI_API_KEY", "")
+os.environ["GROQ_API_KEY"] = st.secrets.get("GROQ_API_KEY", "")
 
 
-# =========================
+# =====================================================
 # CSS
-# =========================
+# =====================================================
 st.markdown("""
 <style>
 .block-container {
-    max-width: 850px;
+    max-width: 900px;
     margin: auto;
-    padding-bottom: 120px;
+    padding-bottom: 100px;
 }
+
 .bottom-container {
     position: sticky;
     bottom: 0;
     background: #0f1117;
-    padding: 10px 0;
+    padding-top: 8px;
     border-top: 1px solid #2a2a2a;
+}
+
+.stChatMessage {
+    border-radius: 12px;
 }
 </style>
 """, unsafe_allow_html=True)
 
 
-# =========================
+# =====================================================
 # LANGUAGE MAP
-# =========================
+# =====================================================
 LANG_MAP = {
     "English": "eng_Latn",
     "Hindi": "hin_Deva",
@@ -48,32 +72,44 @@ LANG_MAP = {
 }
 
 
-# =========================
+# =====================================================
 # SESSION STATE
-# =========================
+# =====================================================
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-if "lang" not in st.session_state:
-    st.session_state.lang = "English"
 
-if "gender" not in st.session_state:
-    st.session_state.gender = "female"
-
-if "last_audio" not in st.session_state:
-    st.session_state.last_audio = None
-
-
-# =========================
-# LOAD
-# =========================
+# =====================================================
+# LOAD ALL
+# =====================================================
 @st.cache_resource
 def load_all():
+
     llm = LLMHandler()
-    speech_handler = SpeechHandler()
+    speech_handler = SpeechHandler(debug=False)
+
     loader = DocumentLoader()
 
-    vs, _, _ = loader.load_from_folder(DOCUMENTS_FOLDER)
+    index_file = os.path.join("faiss_index", "index.faiss")
+
+    # If vector DB exists -> load
+    if os.path.exists(index_file):
+
+        print("✅ Loading Existing FAISS")
+
+        vs = FAISS.load_local(
+            "faiss_index",
+            loader.embeddings,
+            allow_dangerous_deserialization=True
+        )
+
+    # Else build from files + links
+    else:
+
+        print("🆕 Building New FAISS")
+
+        vs = loader.load_from_folder()
+
     llm.set_vectorstore(vs)
 
     return llm, speech_handler
@@ -82,51 +118,66 @@ def load_all():
 llm, speech_handler = load_all()
 
 
-# =========================
+# =====================================================
 # SIDEBAR
-# =========================
+# =====================================================
 with st.sidebar:
+
     st.title("⚖️ LexBot")
 
-    st.session_state.lang = st.selectbox("Language", list(LANG_MAP.keys()))
-    st.session_state.gender = st.radio("Voice", ["female", "male"])
+    selected_lang = st.selectbox(
+        "Language",
+        list(LANG_MAP.keys())
+    )
 
-    if st.button("Clear Chat"):
+    selected_voice = st.radio(
+        "Voice",
+        ["female", "male"]
+    )
+
+    if st.button("🔄 Rebuild Knowledge Base"):
+        loader = DocumentLoader()
+        loader.load_from_folder()
+        st.success("Knowledge Base Updated")
+        st.rerun()
+
+    if st.button("🗑️ Clear Chat"):
         st.session_state.messages = []
-        st.session_state.last_audio = None
         st.rerun()
 
 
-# =========================
+# =====================================================
 # CHAT DISPLAY
-# =========================
+# =====================================================
 for i, msg in enumerate(st.session_state.messages):
 
     with st.chat_message(msg["role"]):
+
         st.write(msg["content"])
 
+        # Assistant actions
         if msg["role"] == "assistant":
 
-            col1, col2 = st.columns([1,1])
+            col1, col2 = st.columns(2)
 
-            # TRANSLATE
+            # Translate
             with col1:
                 if st.button("🌐 Translate", key=f"tr_{i}"):
 
-                    tgt = LANG_MAP[st.session_state.lang]
+                    tgt = LANG_MAP[selected_lang]
 
                     translated = speech_handler.translate(
-                        msg["content"], "eng_Latn", tgt
+                        msg["content"],
+                        "eng_Latn",
+                        tgt
                     )
 
                     st.session_state.messages[i]["translated"] = translated
                     st.rerun()
 
-            # AUDIO
+            # Audio
             with col2:
                 if st.button("🔊 Audio", key=f"tts_{i}"):
-
-                    tgt = LANG_MAP[st.session_state.lang]
 
                     audio = speech_handler.text_to_speech(
                         msg["content"]
@@ -135,7 +186,6 @@ for i, msg in enumerate(st.session_state.messages):
                     st.session_state.messages[i]["audio"] = audio
                     st.rerun()
 
-            # SHOW OUTPUT
             if msg.get("translated"):
                 st.success(msg["translated"])
 
@@ -143,81 +193,42 @@ for i, msg in enumerate(st.session_state.messages):
                 st.audio(msg["audio"], format="audio/mp3")
 
 
-# =========================
-# INPUT (BOTTOM)
-# =========================
+# =====================================================
+# CHAT INPUT
+# =====================================================
 st.markdown('<div class="bottom-container">', unsafe_allow_html=True)
 
-user_input = st.chat_input("Ask your question...")
+user_input = st.chat_input("Ask your legal question...")
 
 st.markdown('</div>', unsafe_allow_html=True)
 
 
-# =========================
-# 🎤 SPEECH INPUT (FIXED)
-# =========================
-audio_data = st.audio_input("🎤 Speak", label_visibility="collapsed")
-
-if audio_data:
-
-    audio_bytes = audio_data.read()
-
-    # Prevent duplicate processing
-    if st.session_state.last_audio == audio_bytes:
-        st.stop()
-
-    st.session_state.last_audio = audio_bytes
-
-    audio_b64 = base64.b64encode(audio_bytes).decode()
-    src_lang = LANG_MAP[st.session_state.lang]
-
-    text = speech_handler.speech_to_text(audio_b64)
-
-    if text and text.strip():
-
-        text = text.strip()
-
-        # ADD USER MESSAGE
-        st.session_state.messages.append({
-            "role": "user",
-            "content": text
-        })
-
-        # GENERATE RESPONSE
-        answer = llm.answer_with_docs(text)
-
-        tgt = LANG_MAP[st.session_state.lang]
-
-        if tgt != "eng_Latn":
-            answer = speech_handler.translate(answer, "eng_Latn", tgt)
-
-        st.session_state.messages.append({
-            "role": "assistant",
-            "content": answer,
-            "translated": None,
-            "audio": None
-        })
-
-        st.rerun()
-
-
-# =========================
-# TEXT INPUT
-# =========================
+# =====================================================
+# PROCESS QUESTION
+# =====================================================
 if user_input:
 
+    # Show user message
     st.session_state.messages.append({
         "role": "user",
         "content": user_input
     })
 
-    answer = llm.answer_with_docs(user_input)
+    with st.spinner("Thinking..."):
 
-    tgt = LANG_MAP[st.session_state.lang]
+        answer = llm.answer_with_docs(user_input)
 
-    if tgt != "eng_Latn":
-        answer = speech_handler.translate(answer, "eng_Latn", tgt)
+        # Translate final answer if needed
+        tgt = LANG_MAP[selected_lang]
 
+        if tgt != "eng_Latn":
+            answer = speech_handler.translate(
+                answer,
+                "eng_Latn",
+                tgt
+            )
+
+    # Store assistant reply
     st.session_state.messages.append({
         "role": "assistant",
         "content": answer,
@@ -226,6 +237,274 @@ if user_input:
     })
 
     st.rerun()
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+## below code is perfect 
+# import os
+# import base64
+# import streamlit as st
+
+# from utils.document_loader import DocumentLoader, DOCUMENTS_FOLDER
+# from utils.llm_handler import LLMHandler
+# from utils.bhashini_handler import SpeechHandler
+# from langchain_community.vectorstores import FAISS
+# # from utils.document_loader import CohereEmbeddings
+
+# # embeddings = CohereEmbeddings()
+
+
+# # =========================
+# # CONFIG
+# # =========================
+# st.set_page_config(page_title="LexBot", page_icon="⚖️", layout="centered")
+
+# os.environ["BHASHINI_API_KEY"] = st.secrets.get("BHASHINI_API_KEY", "")
+
+
+# # =========================
+# # CSS
+# # =========================
+# st.markdown("""
+# <style>
+# .block-container {
+#     max-width: 850px;
+#     margin: auto;
+#     padding-bottom: 120px;
+# }
+# .bottom-container {
+#     position: sticky;
+#     bottom: 0;
+#     background: #0f1117;
+#     padding: 10px 0;
+#     border-top: 1px solid #2a2a2a;
+# }
+# </style>
+# """, unsafe_allow_html=True)
+
+
+# # =========================
+# # LANGUAGE MAP
+# # =========================
+# LANG_MAP = {
+#     "English": "eng_Latn",
+#     "Hindi": "hin_Deva",
+#     "Marathi": "mar_Deva",
+#     "Tamil": "tam_Taml",
+#     "Telugu": "tel_Telu",
+# }
+
+
+# # =========================
+# # SESSION STATE
+# # =========================
+# if "messages" not in st.session_state:
+#     st.session_state.messages = []
+
+# if "lang" not in st.session_state:
+#     st.session_state.lang = "English"
+
+# if "gender" not in st.session_state:
+#     st.session_state.gender = "female"
+
+# if "last_audio" not in st.session_state:
+#     st.session_state.last_audio = None
+
+
+# # =========================
+# # LOAD
+# # =========================
+# @st.cache_resource
+# def load_all():
+
+#     llm = LLMHandler()
+#     speech_handler = SpeechHandler()
+
+#     loader = DocumentLoader()
+
+#     index_file = os.path.join("faiss_index", "index.faiss")
+
+#     # If FAISS already exists → load it
+#     if os.path.exists(index_file):
+
+#         print("✅ Existing FAISS found. Loading...")
+
+#         vs = FAISS.load_local(
+#             "faiss_index",
+#             loader.embeddings,
+#             allow_dangerous_deserialization=True
+#         )
+
+#     # If not exists → create from files
+#     else:
+
+#         print("🆕 No FAISS found. Building new index...")
+
+#         vs = loader.load_from_folder(DOCUMENTS_FOLDER)
+
+#     llm.set_vectorstore(vs)
+
+#     return llm, speech_handler
+
+
+# llm, speech_handler = load_all()
+
+
+# # =========================
+# # SIDEBAR
+# # =========================
+# with st.sidebar:
+#     st.title("⚖️ LexBot")
+
+#     st.session_state.lang = st.selectbox("Language", list(LANG_MAP.keys()))
+#     st.session_state.gender = st.radio("Voice", ["female", "male"])
+
+#     if st.button("Clear Chat"):
+#         st.session_state.messages = []
+#         st.session_state.last_audio = None
+#         st.rerun()
+
+
+# # =========================
+# # CHAT DISPLAY
+# # =========================
+# for i, msg in enumerate(st.session_state.messages):
+
+#     with st.chat_message(msg["role"]):
+#         st.write(msg["content"])
+
+#         if msg["role"] == "assistant":
+
+#             col1, col2 = st.columns([1,1])
+
+#             # TRANSLATE
+#             with col1:
+#                 if st.button("🌐 Translate", key=f"tr_{i}"):
+
+#                     tgt = LANG_MAP[st.session_state.lang]
+
+#                     translated = speech_handler.translate(
+#                         msg["content"], "eng_Latn", tgt
+#                     )
+
+#                     st.session_state.messages[i]["translated"] = translated
+#                     st.rerun()
+
+#             # AUDIO
+#             with col2:
+#                 if st.button("🔊 Audio", key=f"tts_{i}"):
+
+#                     tgt = LANG_MAP[st.session_state.lang]
+
+#                     audio = speech_handler.text_to_speech(
+#                         msg["content"]
+#                     )
+
+#                     st.session_state.messages[i]["audio"] = audio
+#                     st.rerun()
+
+#             # SHOW OUTPUT
+#             if msg.get("translated"):
+#                 st.success(msg["translated"])
+
+#             if msg.get("audio"):
+#                 st.audio(msg["audio"], format="audio/mp3")
+
+
+# # =========================
+# # INPUT (BOTTOM)
+# # =========================
+# st.markdown('<div class="bottom-container">', unsafe_allow_html=True)
+
+# user_input = st.chat_input("Ask your question...")
+
+# st.markdown('</div>', unsafe_allow_html=True)
+
+
+# # =========================
+# # 🎤 SPEECH INPUT (FIXED)
+# # =========================
+# audio_data = st.audio_input("🎤 Speak", label_visibility="collapsed")
+
+# if audio_data:
+
+#     audio_bytes = audio_data.read()
+
+#     # Prevent duplicate processing
+#     if st.session_state.last_audio == audio_bytes:
+#         st.stop()
+
+#     st.session_state.last_audio = audio_bytes
+
+#     audio_b64 = base64.b64encode(audio_bytes).decode()
+#     src_lang = LANG_MAP[st.session_state.lang]
+
+#     text = speech_handler.speech_to_text(audio_b64)
+
+#     if text and text.strip():
+
+#         text = text.strip()
+
+#         # ADD USER MESSAGE
+#         st.session_state.messages.append({
+#             "role": "user",
+#             "content": text
+#         })
+
+#         # GENERATE RESPONSE
+#         answer = llm.answer_with_docs(text)
+
+#         tgt = LANG_MAP[st.session_state.lang]
+
+#         if tgt != "eng_Latn":
+#             answer = speech_handler.translate(answer, "eng_Latn", tgt)
+
+#         st.session_state.messages.append({
+#             "role": "assistant",
+#             "content": answer,
+#             "translated": None,
+#             "audio": None
+#         })
+
+#         st.rerun()
+
+
+# # =========================
+# # TEXT INPUT
+# # =========================
+# if user_input:
+
+#     st.session_state.messages.append({
+#         "role": "user",
+#         "content": user_input
+#     })
+
+#     answer = llm.answer_with_docs(user_input)
+
+#     tgt = LANG_MAP[st.session_state.lang]
+
+#     if tgt != "eng_Latn":
+#         answer = speech_handler.translate(answer, "eng_Latn", tgt)
+
+#     st.session_state.messages.append({
+#         "role": "assistant",
+#         "content": answer,
+#         "translated": None,
+#         "audio": None
+#     })
+
+#     st.rerun()
 
 
 
