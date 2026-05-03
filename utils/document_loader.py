@@ -69,7 +69,8 @@ def get_file_hash(path):
 # =====================================================
 def clean_text(text):
 
-    text = text.replace("\n", " ")
+    # text = text.replace("\n", " ")
+    text = re.sub(r'\n{2,}', '\n\n', text)
     text = text.replace("\t", " ")
 
     text = re.sub(r'@\w+', '', text)
@@ -146,8 +147,10 @@ class DocumentLoader:
         self.embeddings = get_embeddings()
 
         self.splitter = RecursiveCharacterTextSplitter(
-            chunk_size=700,
-            chunk_overlap=120,
+            # chunk_size=700,
+            # chunk_overlap=120,
+            chunk_size=1200,
+            chunk_overlap=200,
             separators=[
                 "\nQ.",
                 "\nQuestion:",
